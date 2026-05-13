@@ -36,26 +36,40 @@ def is_serial_connected() -> bool:
 
 def _open_serial():
     import serial
+    import serial.tools.list_ports
     from django.conf import settings
+
+    open_errors = (OSError, serial.SerialException)
 
     forced = (getattr(settings, "ARDUINO_PORT", None) or "").strip()
     if forced:
-        return serial.Serial(
-            forced,
-            9600,
-            timeout=1,
-            write_timeout=2,
-            dsrdtr=False,
-            rtscts=False,
-        )
-
-    import serial.tools.list_ports
+        try:
+            ser = serial.Serial(
+                forced,
+                9600,
+                timeout=1,
+                write_timeout=2,
+                dsrdtr=False,
+                rtscts=False,
+            )
+            logger.info("Using ARDUINO_PORT %s", forced)
+            return ser
+        except open_errors as e:
+            logger.warning(
+                "ARDUINO_PORT %s could not be opened (close Serial Monitor / other apps using this COM port): %s",
+                forced,
+                e,
+            )
+            return None
 
     ports = list(serial.tools.list_ports.comports())
 
     def port_key(p):
         desc = (p.description or "").lower()
         score = 0
+        # Prefer USB-UART bridges; skip obvious Bluetooth virtual ports (often Permission denied on Windows).
+        if "bluetooth" in desc:
+            score -= 100
         for key in (
             "arduino",
             "ch340",
@@ -79,8 +93,12 @@ def _open_serial():
                 dsrdtr=False,
                 rtscts=False,
             )
-        except OSError as e:
+        except open_errors as e:
             logger.warning("Serial open failed %s: %s", port.device, e)
+    logger.warning(
+        "No serial port could be opened. Set ARDUINO_PORT in .env to your Arduino COM port "
+        "(Device Manager) and ensure nothing else uses it (Arduino IDE Serial Monitor, etc.).",
+    )
     return None
 
 
@@ -186,6 +204,8 @@ def _handle_line(line: str) -> None:
 
 
 def _reader_loop() -> None:
+    import serial as pyserial
+
     global _serial, _serial_connected
     while True:
         try:
@@ -221,8 +241,13 @@ def _reader_loop() -> None:
             raw = b""
             with _serial_io_lock:
                 if _serial is not None and getattr(_serial, "is_open", False):
-                    if _serial.in_waiting:
-                        raw = _serial.readline()
+                    try:
+                        # Windows drivers sometimes throw SerialException on in_waiting if the handle is stale.
+                        if _serial.in_waiting:
+                            raw = _serial.readline()
+                    except pyserial.SerialException as e:
+                        logger.warning("Serial read poll failed (will reconnect): %s", e)
+                        raise
 
             if not raw:
                 time.sleep(0.08)
