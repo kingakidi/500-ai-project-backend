@@ -1,9 +1,13 @@
+import logging
+
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 
 from utils.response import APIResponse
 
 from .services import hardware
+
+logger = logging.getLogger(__name__)
 
 
 class FingerprintEnrollStartView(APIView):
@@ -25,7 +29,16 @@ class FingerprintEnrollStartView(APIView):
         ok, payload = hardware.try_start_enroll(str(student_id))
         if not ok:
             msg = payload.get("message", "Could not start enrollment.")
-            code = 409 if "progress" in msg.lower() else 400
+            lower = msg.lower()
+            if "progress" in lower:
+                code = 409
+            elif any(
+                x in lower
+                for x in ("serial", "usb", "connected", "timeout", "port")
+            ):
+                code = 503
+            else:
+                code = 400
             return APIResponse.error(msg, error={}, status_code=code)
         return APIResponse.success(
             payload.get("message", "Started."),
@@ -67,6 +80,18 @@ class FingerprintScanLatestView(APIView):
     def get(self, request):
         scan = hardware.get_last_scan()
         connected = hardware.is_serial_connected()
+        user_label = getattr(request.user, "email", None) or getattr(
+            request.user,
+            "pk",
+            request.user,
+        )
+        log_line = (
+            "[fingerprint/scan/latest] GET "
+            f"user={user_label!r} serial_connected={connected} "
+            f"event_id={scan.get('event_id', 0)}"
+        )
+        logger.info(log_line)
+        print(log_line, flush=True)
         return APIResponse.success(
             "OK",
             data={

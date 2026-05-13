@@ -4,11 +4,11 @@ import logging
 import threading
 import time
 import uuid
-import uuid
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
+_serial_io_lock = threading.Lock()
 _enroll_lock = threading.Lock()
 _reader_thread: threading.Thread | None = None
 _reader_started = False
@@ -26,7 +26,12 @@ _serial_connected = False
 
 
 def is_serial_connected() -> bool:
-    return _serial_connected and _serial is not None and getattr(_serial, "is_open", False)
+    with _serial_io_lock:
+        return bool(
+            _serial_connected
+            and _serial is not None
+            and getattr(_serial, "is_open", False)
+        )
 
 
 def _open_serial():
@@ -70,7 +75,7 @@ def _open_serial():
                 port.device,
                 9600,
                 timeout=1,
-                write_timeout=2,
+                write_timeout=None,
                 dsrdtr=False,
                 rtscts=False,
             )
@@ -184,36 +189,59 @@ def _reader_loop() -> None:
     global _serial, _serial_connected
     while True:
         try:
-            if _serial is None or not _serial.is_open:
-                _serial_connected = False
-                _serial = _open_serial()
-                if _serial is None:
-                    time.sleep(3)
-                    continue
-                time.sleep(2.5)
-                _serial_connected = True
-                logger.info("Fingerprint serial connected: %s", _serial.name)
+            opened_fresh = False
+            with _serial_io_lock:
+                if _serial is None or not getattr(_serial, "is_open", False):
+                    _serial_connected = False
+                    if _serial is not None:
+                        try:
+                            _serial.close()
+                        except OSError:
+                            pass
+                        _serial = None
+                    _serial = _open_serial()
+                    if _serial is not None:
+                        opened_fresh = True
 
-            if _serial.in_waiting:
-                raw = _serial.readline()
-                if not raw:
-                    time.sleep(0.05)
-                    continue
-                line = raw.decode("utf-8", errors="replace").strip()
-                if line:
-                    logger.debug("Serial RX: %s", line)
-                    _handle_line(line)
-            else:
+            if opened_fresh:
+                time.sleep(2.5)
+                with _serial_io_lock:
+                    if _serial is not None and getattr(_serial, "is_open", False):
+                        _serial_connected = True
+                        logger.info("Fingerprint serial connected: %s", _serial.name)
+                    else:
+                        _serial_connected = False
+
+            with _serial_io_lock:
+                ser_ok = _serial is not None and getattr(_serial, "is_open", False)
+            if not ser_ok:
+                time.sleep(3)
+                continue
+
+            raw = b""
+            with _serial_io_lock:
+                if _serial is not None and getattr(_serial, "is_open", False):
+                    if _serial.in_waiting:
+                        raw = _serial.readline()
+
+            if not raw:
                 time.sleep(0.08)
+                continue
+
+            line = raw.decode("utf-8", errors="replace").strip()
+            if line:
+                logger.debug("Serial RX: %s", line)
+                _handle_line(line)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Serial reader error: %s", exc)
-            _serial_connected = False
-            try:
-                if _serial:
-                    _serial.close()
-            except OSError:
-                pass
-            _serial = None
+            with _serial_io_lock:
+                _serial_connected = False
+                if _serial is not None:
+                    try:
+                        _serial.close()
+                    except OSError:
+                        pass
+                    _serial = None
             time.sleep(2)
 
 
@@ -236,12 +264,20 @@ def ensure_reader_running() -> None:
 
 
 def write_command(text: str) -> bool:
-    if not is_serial_connected():
-        return False
+    import serial as pyserial
+
+    data = text if text.endswith("\n") else f"{text}\n"
+    payload = data.encode("utf-8")
     try:
-        data = text if text.endswith("\n") else f"{text}\n"
-        _serial.write(data.encode("utf-8"))
+        with _serial_io_lock:
+            if _serial is None or not getattr(_serial, "is_open", False):
+                return False
+            _serial.write(payload)
+            _serial.flush()
         return True
+    except pyserial.SerialException as e:
+        logger.error("Serial write failed: %s", e)
+        return False
     except OSError as e:
         logger.error("Serial write failed: %s", e)
         return False
