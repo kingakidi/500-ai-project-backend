@@ -6,9 +6,9 @@ from departments.models import Department
 
 
 student_reg_no_validator = RegexValidator(
-    regex=r"^u\d{2}[a-zA-Z]{2,4}\d{4}$",
+    regex=r"(?i)^u\d{2}[a-z]{2,4}\d{4}$",
     message=(
-        "Invalid registration number format. Example: u21co1001, u21mls1001, u21msde1001."
+        "Invalid registration number format. Example: U21CO1001 or u21co1001, u21mls1001."
     ),
 )
 
